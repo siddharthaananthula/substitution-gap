@@ -1,0 +1,15 @@
+# Data: too big for Git, and not ours to redistribute
+data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Secrets (Azure keys later)
+.env
+
+.vscode/
