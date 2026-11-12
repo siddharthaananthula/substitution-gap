@@ -43,6 +43,24 @@ def load_products():
     )
 
 
+def load_train_lines():
+    """Every line of each customer's final (train) order, with the customer attached."""
+    orders = load_orders()
+    train = orders.loc[
+        orders["eval_set"] == "train", ["order_id", "user_id", "order_number"]
+    ]
+    lines = pd.read_csv(
+        DATA / "order_products__train.csv",
+        dtype={
+            "order_id": "int32",
+            "product_id": "int32",
+            "add_to_cart_order": "int16",
+            "reordered": "int8",
+        },
+    )
+    return lines.merge(train, on="order_id", how="inner")
+
+
 def load_prior_lines():
     """Every prior order line, with the customer and order number attached."""
     orders = load_orders()
