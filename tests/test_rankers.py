@@ -2,38 +2,56 @@
 import pandas as pd
 import pytest
 
-from src.rankers import behaviour_ranker, popularity_ranker, similarity_ranker
+from src.rankers import (
+    behaviour_dept_ranker,
+    behaviour_ranker,
+    popularity_ranker,
+    similarity_ranker,
+)
 
 PRODUCTS = pd.DataFrame({
     "product_id": pd.array([1, 2, 3, 4, 5], dtype="int32"),
     "product_name": pd.array(["Whole Milk", "Organic Whole Milk", "Skim Milk",
                               "Whole Milk Yogurt", "Banana"], dtype="string"),
     "aisle_id": pd.array([10, 10, 10, 20, 30], dtype="int16"),
+    "department_id": pd.array([1, 1, 1, 2, 3], dtype="int8"),
 })
 COUNTS = pd.Series({1: 50, 2: 10, 3: 30, 4: 99, 5: 99})
 
 
 @pytest.fixture
-def behaviour(tmp_path):
+def pairs_path(tmp_path):
     path = tmp_path / "subs.parquet"
     pd.DataFrame({
-        "a": pd.array([1, 1, 1, 1], dtype="int32"),
-        "b": pd.array([2, 3, 4, 1], dtype="int32"),
-        "lift_low_adj": [5.0, 1.5, 3.0, 9.0],  # 3 below cut-off; (1, 1) is A itself
+        "a": pd.array([1, 1, 1, 1, 4], dtype="int32"),
+        "b": pd.array([2, 3, 4, 1, 5], dtype="int32"),
+        # 3 below cut-off; (1, 1) is A itself; 4 and 5 are other departments
+        "lift_low_adj": [5.0, 1.5, 3.0, 9.0, 4.0],
     }).to_parquet(path)
-    return behaviour_ranker(path)
+    return path
 
 
 @pytest.fixture
-def rankers(behaviour):
+def behaviour(pairs_path):
+    return behaviour_ranker(pairs_path)
+
+
+@pytest.fixture
+def behaviour_dept(pairs_path):
+    return behaviour_dept_ranker(PRODUCTS, pairs_path)
+
+
+@pytest.fixture
+def rankers(behaviour, behaviour_dept):
     return {
         "similarity": similarity_ranker(PRODUCTS),
         "behaviour": behaviour,
+        "behaviour_dept": behaviour_dept,
         "popularity": popularity_ranker(PRODUCTS, COUNTS),
     }
 
 
-@pytest.mark.parametrize("name", ["similarity", "behaviour", "popularity"])
+@pytest.mark.parametrize("name", ["similarity", "behaviour", "behaviour_dept", "popularity"])
 def test_never_returns_a(rankers, name):
     for a in PRODUCTS["product_id"]:
         assert a not in rankers[name](a, 10).index
@@ -55,6 +73,16 @@ def test_scores_sorted_and_k_respected(rankers):
 def test_behaviour_uses_cutoff(behaviour):
     assert list(behaviour(1, 10).index) == [2, 4]  # 5.0 > 3.0; 3 dropped (1.5 <= 2); A dropped
     assert behaviour(2, 10).empty  # no pairs for this A
+
+
+def test_behaviour_dept_stays_in_department(behaviour, behaviour_dept):
+    dept = PRODUCTS.set_index("product_id")["department_id"]
+    assert list(behaviour(1, 10).index) == [2, 4]  # original keeps cross-department 4
+    assert list(behaviour_dept(1, 10).index) == [2]  # 4 is in another department
+    assert behaviour_dept(4, 10).empty  # its only pair (4 -> 5) crosses departments
+    for a in PRODUCTS["product_id"]:
+        for b in behaviour_dept(a, 10).index:
+            assert dept[b] == dept[a]
 
 
 def test_unknown_product_returns_empty(rankers):

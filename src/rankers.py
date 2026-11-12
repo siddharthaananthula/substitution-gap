@@ -43,28 +43,29 @@ def similarity_ranker(products, analyzer="char_wb", ngram_range=(3, 4)):
     aisles = products["aisle_id"].to_numpy()
     pos, members = _aisle_members(products)
 
-    @lru_cache(maxsize=None)
-    def _scores(a):
+    @lru_cache(maxsize=None)  # caches only the top-k result, not whole-aisle scores
+    def _rank(a, k):
         if a not in pos.index:
-            return None
+            return _top_k([], [], a, k)
         i = pos[a]
         cand = members[aisles[i]]
         sims = (X[cand] @ X[i].T).toarray().ravel()  # cosine = dot of unit vectors
-        return ids[cand], sims
+        return _top_k(ids[cand], sims, a, k)
 
     def rank(a, k):
-        res = _scores(int(a))
-        if res is None:
-            return _top_k([], [], a, k)
-        return _top_k(*res, a, k)
+        return _rank(int(a), int(k))
 
     return rank
 
 
-def behaviour_ranker(path=SUBSTITUTES, min_score=MIN_LIFT_LOW_ADJ):
-    """Candidates from behavioural pairs with lift_low_adj > min_score, ranked by it."""
+def _load_confident_pairs(path, min_score):
+    """Behavioural pairs with lift_low_adj > min_score, excluding A == B."""
     pairs = pd.read_parquet(path, columns=["a", "b", "lift_low_adj"])
-    pairs = pairs[(pairs["lift_low_adj"] > min_score) & (pairs["a"] != pairs["b"])]
+    return pairs[(pairs["lift_low_adj"] > min_score) & (pairs["a"] != pairs["b"])]
+
+
+def _pairs_ranker(pairs):
+    """rank(a, k) over a pairs table, ranked by lift_low_adj."""
     by_a = {a: (g["b"].to_numpy(), g["lift_low_adj"].to_numpy())
             for a, g in pairs.groupby("a")}
 
@@ -73,6 +74,21 @@ def behaviour_ranker(path=SUBSTITUTES, min_score=MIN_LIFT_LOW_ADJ):
         return _top_k(ids, scores, a, k)
 
     return rank
+
+
+def behaviour_ranker(path=SUBSTITUTES, min_score=MIN_LIFT_LOW_ADJ):
+    """Candidates from behavioural pairs with lift_low_adj > min_score, ranked by it."""
+    return _pairs_ranker(_load_confident_pairs(path, min_score))
+
+
+def behaviour_dept_ranker(products, path=SUBSTITUTES, min_score=MIN_LIFT_LOW_ADJ):
+    """behaviour_ranker, keeping only candidates in the same department as A."""
+    pairs = _load_confident_pairs(path, min_score)
+    dept = products.set_index("product_id")["department_id"]
+    n_before = len(pairs)
+    pairs = pairs[pairs["a"].map(dept).to_numpy() == pairs["b"].map(dept).to_numpy()]
+    assert len(pairs) <= n_before
+    return _pairs_ranker(pairs)
 
 
 def first_buy_counts():
@@ -105,6 +121,7 @@ def main():
     rankers = {
         "similarity": similarity_ranker(products),
         "behaviour": behaviour_ranker(),
+        "behaviour_dept": behaviour_dept_ranker(products),
         "popularity": popularity_ranker(products, first_buy_counts()),
     }
     for name in ("Banana", "Organic Whole Milk", "Organic Hass Avocado"):
