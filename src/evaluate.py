@@ -124,9 +124,13 @@ def candidate_table(rank, a_ids, k):
 
 
 def score_events(events, cands, truth, groups, ks=KS):
-    """Per-event coverage, hit@k and NDCG@k (binary relevance) for every truth set."""
-    n_cands = events["a"].map(cands.groupby("a").size()).fillna(0)
-    c = events[["event_id", "order_id", "a"]].merge(cands, on="a")
+    """Per-event coverage, hit@k and NDCG@k (binary relevance) for every truth set.
+
+    cands is keyed by "a" (same list for every event of A) or by "event_id" (per-event list).
+    """
+    key = "event_id" if "event_id" in cands.columns else "a"
+    n_cands = events[key].map(cands.groupby(key).size()).fillna(0)
+    c = events[["event_id", "order_id", "a"]].merge(cands, on=key)
     assert len(c) == n_cands.sum(), "candidate join row count mismatch"
 
     c = c.merge(truth.assign(loose=True), on=["order_id", "b"], how="left")

@@ -4,3 +4,4 @@ ipykernel
 pyarrow
 psutil
 scikit-learn
+lightgbm
