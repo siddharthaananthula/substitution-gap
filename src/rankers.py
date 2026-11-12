@@ -34,11 +34,16 @@ def _aisle_members(products):
     return pos, members
 
 
+def name_vectors(products, analyzer="char_wb", ngram_range=(3, 4)):
+    """L2-normalised TF-IDF vectors of product names; row i is products.iloc[i]."""
+    tfidf = TfidfVectorizer(analyzer=analyzer, ngram_range=ngram_range, lowercase=True)
+    return tfidf.fit_transform(products["product_name"].astype(str))
+
+
 def similarity_ranker(products, analyzer="char_wb", ngram_range=(3, 4)):
     """Same-aisle candidates ranked by TF-IDF cosine similarity of product names."""
     products = products[["product_id", "product_name", "aisle_id"]].reset_index(drop=True)
-    tfidf = TfidfVectorizer(analyzer=analyzer, ngram_range=ngram_range, lowercase=True)
-    X = tfidf.fit_transform(products["product_name"].astype(str))  # rows are L2-normalised
+    X = name_vectors(products, analyzer, ngram_range)  # rows are L2-normalised
     ids = products["product_id"].to_numpy()
     aisles = products["aisle_id"].to_numpy()
     pos, members = _aisle_members(products)
