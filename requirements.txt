@@ -3,3 +3,4 @@ jupyter
 ipykernel
 pyarrow
 psutil
+scikit-learn
