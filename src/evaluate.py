@@ -237,6 +237,38 @@ def print_hybrid_table(table):
     print(wide.to_string())
 
 
+EVAL_DIR = OUT / "eval_window"
+
+
+def evaluation_set(products, cache=True):
+    """Evaluation events (with event_id and truth sizes), truth and prior first-buy counts.
+
+    Same steps and event order as main(), so event_ids match. Cached in data/processed/eval_window.
+    """
+    paths = {n: EVAL_DIR / f"{n}.parquet" for n in ("events", "truth", "first_buy_counts")}
+    if cache and all(p.exists() for p in paths.values()):
+        counts = pd.read_parquet(paths["first_buy_counts"]).set_index("product_id")["count"]
+        return pd.read_parquet(paths["events"]), pd.read_parquet(paths["truth"]), counts
+
+    reg = prior_regulars()
+    counts = first_buy_counts()
+    train_lines = load_train_lines()[["order_id", "user_id", "product_id", "reordered"]]
+    events = build_events(reg, train_lines)
+    truth = first_time_buys(train_lines)
+    del reg, train_lines
+    gc.collect()
+    events["event_id"] = np.arange(len(events), dtype="int32")
+    groups = {t: products.set_index("product_id")[c] for t, c in GROUP_COL.items()}
+    events = add_truth_sizes(events, truth, groups)
+
+    EVAL_DIR.mkdir(parents=True, exist_ok=True)
+    events.to_parquet(paths["events"], index=False)
+    truth.to_parquet(paths["truth"], index=False)
+    counts.rename("count").rename_axis("product_id").reset_index().to_parquet(
+        paths["first_buy_counts"], index=False)
+    return events, truth, counts
+
+
 def ceilings(events, covered):
     """Best possible hit rate: share of events with at least one truth product."""
     rows = []
