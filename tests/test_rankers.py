@@ -5,6 +5,7 @@ import pytest
 from src.rankers import (
     behaviour_dept_ranker,
     behaviour_ranker,
+    hybrid_ranker,
     popularity_ranker,
     similarity_ranker,
 )
@@ -48,10 +49,13 @@ def rankers(behaviour, behaviour_dept):
         "behaviour": behaviour,
         "behaviour_dept": behaviour_dept,
         "popularity": popularity_ranker(PRODUCTS, COUNTS),
+        "hybrid_pop": hybrid_ranker(behaviour_dept, popularity_ranker(PRODUCTS, COUNTS)),
+        "hybrid_sim": hybrid_ranker(behaviour_dept, similarity_ranker(PRODUCTS)),
     }
 
 
-@pytest.mark.parametrize("name", ["similarity", "behaviour", "behaviour_dept", "popularity"])
+@pytest.mark.parametrize("name", ["similarity", "behaviour", "behaviour_dept", "popularity",
+                                  "hybrid_pop", "hybrid_sim"])
 def test_never_returns_a(rankers, name):
     for a in PRODUCTS["product_id"]:
         assert a not in rankers[name](a, 10).index
@@ -83,6 +87,29 @@ def test_behaviour_dept_stays_in_department(behaviour, behaviour_dept):
     for a in PRODUCTS["product_id"]:
         for b in behaviour_dept(a, 10).index:
             assert dept[b] == dept[a]
+
+
+def test_hybrid_puts_primary_first_then_fills(rankers):
+    # behaviour_dept(1) = [2]; popularity in aisle 10 for A=1 = [3 (30), 2 (10)]
+    top = rankers["hybrid_pop"](1, 5)
+    assert list(top.index) == [2, 3]  # 2 from primary, 3 fills; 2 not repeated
+    assert top.index.is_unique
+    assert list(rankers["hybrid_pop"](1, 1).index) == [2]  # k = 1: primary only
+
+
+def test_hybrid_uses_fallback_when_primary_empty(rankers):
+    # A=3 has no behavioural pairs, so hybrid_pop equals popularity
+    assert list(rankers["hybrid_pop"](3, 5).index) == list(rankers["popularity"](3, 5).index)
+
+
+def test_hybrid_fills_despite_overlap():
+    def primary(a, k):
+        return pd.Series([9.0], index=pd.Index([2], name="b")).iloc[:k]
+
+    def fallback(a, k):  # overlaps with primary in its first slot
+        return pd.Series([5.0, 4.0, 3.0], index=pd.Index([2, 3, 4], name="b")).iloc[:k]
+
+    assert list(hybrid_ranker(primary, fallback)(1, 3).index) == [2, 3, 4]
 
 
 def test_unknown_product_returns_empty(rankers):

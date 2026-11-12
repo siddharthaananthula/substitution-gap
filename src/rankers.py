@@ -115,6 +115,23 @@ def popularity_ranker(products, counts):
     return rank
 
 
+def hybrid_ranker(primary, fallback):
+    """primary's candidates first, then fallback's to fill up to k (no duplicates, never A).
+
+    Order is the ranking; scores come from different rankers and are not comparable.
+    """
+    def rank(a, k):
+        first = primary(a, k)
+        need = k - len(first)
+        if need <= 0:
+            return first
+        extra = fallback(a, k + len(first))  # ask for more so dropping overlaps still fills k
+        extra = extra[~extra.index.isin(first.index) & (extra.index != a)].iloc[:need]
+        return pd.concat([first, extra])
+
+    return rank
+
+
 def main():
     products = load_products()
     names = products.set_index("product_id")["product_name"]

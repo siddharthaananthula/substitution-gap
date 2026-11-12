@@ -193,3 +193,59 @@ At a 25% share, a typical customer had 8 regulars (median), the size of a whole 
 - Some raw-lift top pairs looked like catalogue duplicates (Water Mineral vs Mineral Water). They fell away once ranked by lift_low.
 
 **Known limitation:** Only 10% of regular products have a confident substitute, almost all fresh produce and milk.
+
+## D016: Evaluation design and results: behaviour first, popularity as fallback
+**Date:** 12 Nov 2026 · **Status:** Active
+
+**Evaluation set:** each customer's final order (`train`), never used to build regulars or pairs. An event is a regular product A (from prior orders) missing from the final order: 65,476 events from 29,701 customers. Customers whose final order is `test` are ignored (products hidden).
+
+**Truth sets (first-time buys in the final order):**
+
+| Truth | Definition | Ceiling (all events) |
+|---|---|---|
+| loose | any first-time buy | 78.6% |
+| strict | first-time buy in A's department | 29.5% |
+| aisle | first-time buy in A's aisle | 11.3% |
+
+"Aisle" is the closest proxy for "bought instead of A". None of them is an observed accept/reject decision.
+
+**Rankers:**
+- similarity: same aisle, TF-IDF cosine on product names, character 3–4-grams (word matching missed "Banana" vs "Bananas" and would have made the baseline unfairly weak)
+- popularity: same aisle, ranked by first-time buys in prior orders
+- behaviour_dept: pairs with lift_low_adj > 2 (D015), restricted to A's department
+- hybrid_sim / hybrid_pop: behaviour_dept candidates first, remaining slots filled from similarity / popularity
+
+**Department filter:** without it, Banana's behavioural candidates included Coconut Cream, Ice and Belgian Lager. These are shopping-occasion effects (a party shop skips bananas), not substitutes. Removing all cross-department pairs cost zero hits and 0.4 points of coverage.
+
+**Results (hit@k, all 65,476 events, aisle truth):**
+
+| k | similarity | popularity | behaviour_dept | hybrid_sim | hybrid_pop |
+|---|---|---|---|---|---|
+| 1 | 0.2% | 0.6% | 0.6% | 0.7% | 0.7% |
+| 5 | 1.1% | 2.2% | 0.9% | 1.4% | 2.3% |
+
+- On the 25,582 events both cover, behaviour_dept beat similarity at k = 1: 1.5% vs 0.4%, difference +1.1 points [95% CI +1.0, +1.3].
+- Putting behavioural candidates first improved both baselines on all events: hybrid_sim − similarity +0.4 points at every k (CI excludes zero); hybrid_pop − popularity +0.1 to +0.2 points (aisle truth at k = 3 and 5: lower bounds +0.01 and +0.02, small but real).
+- hybrid_pop is the best ranker under every truth set and k.
+- CIs: 200 bootstrap resamples of customers (not events), seed 42, paired on the same events.
+
+**Decision:** Use hybrid_pop as the current best ranker and the baseline for the acceptance model. Similarity ranks worst of all five, which supports the project's core claim that "looks similar" is the wrong objective.
+
+**Limitations:** absolute hit rates are low (under 2.5%) because truth is a proxy built from first-time buys, not observed substitution outcomes. Behaviour covers only 39% of events and usually has one candidate per product. Catalogue duplicates (e.g. "Organic  Whole Milk" with a double space) appear as separate products.
+
+---
+
+## D017: Warehouse per project: DuckDB + dbt here, Snowflake in Promo Effectiveness
+**Date:** 12 Nov 2026 · **Status:** Active
+
+**Decision:** The Substitution Gap's data layer uses DuckDB with dbt (dbt-duckdb). Snowflake + dbt is planned for Project 2 (Promo Effectiveness). The retail analytics project already uses Postgres.
+
+**Rejected:** Snowflake for this project.
+
+**Why:**
+- The heavy computation here is in Python. The API only reads one pre-built table, so a database server adds cost and moving parts for no benefit.
+- DuckDB runs inside the app container: no second container, no trial expiry, and the deployed demo keeps working.
+- Snowflake's free trial is time-limited. It suits a SQL-first project (promo lift, cannibalisation, margin ledger) built in one focused window.
+- Three projects, three data platforms (Postgres, DuckDB, Snowflake), each chosen for a reason.
+
+**Limit:** DuckDB is not built for many concurrent writers. That doesn't matter for a read-only serving table.

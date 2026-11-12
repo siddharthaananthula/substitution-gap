@@ -1,9 +1,10 @@
 """Evaluate substitute rankers on each customer's final (train) order. See DECISIONS.md D011.
 
 An event is a regular product A (found from prior orders only) that is missing
-from the customer's final order. Two truth sets per event:
+from the customer's final order. Three truth sets per event:
   loose  = every first-time buy (reordered == 0) in that final order
   strict = first-time buys in the same department as A
+  aisle  = first-time buys in the same aisle as A
 
 Run with: python -m src.evaluate
 """
@@ -20,14 +21,19 @@ from src.rankers import (
     behaviour_dept_ranker,
     behaviour_ranker,
     first_buy_counts,
+    hybrid_ranker,
     popularity_ranker,
     similarity_ranker,
 )
 
 OUT = Path(__file__).resolve().parents[1] / "data" / "processed"
 KS = (1, 3, 5)
-TRUTHS = ("loose", "strict")
-MAIN = "behaviour_dept"  # the ranker every other ranker is compared against
+GROUP_COL = {"strict": "department_id", "aisle": "aisle_id"}  # truth = same group as A
+TRUTHS = ("loose", *GROUP_COL)
+MAIN = "behaviour_dept"  # Task 5: the ranker every other ranker is compared against
+TASK5_RANKERS = ("similarity", "popularity", "behaviour", MAIN)
+TASK6_RANKERS = ("similarity", "popularity", MAIN, "hybrid_sim", "hybrid_pop")
+HYBRID_VS = {"hybrid_sim": "similarity", "hybrid_pop": "popularity"}
 N_BOOT = 200
 SEED = 42
 
@@ -84,16 +90,22 @@ def summarise_events(events, truth, reg, train_lines, names):
 
 # --- scoring (Task 5) --------------------------------------------------------
 
-def add_truth_sizes(events, truth, dept):
-    """Number of loose and strict truth products for each event."""
+def same_group(a, b, group):
+    """True where products a and b share a group (department or aisle)."""
+    return a.map(group).to_numpy() == b.map(group).to_numpy()
+
+
+def add_truth_sizes(events, truth, groups):
+    """Number of truth products per event for every truth set (n_loose, n_strict, n_aisle)."""
     ev = events.copy()
     ev["n_loose"] = ev["order_id"].map(truth.groupby("order_id").size()).fillna(0)
 
     t = ev[["event_id", "order_id", "a"]].merge(truth, on="order_id")
     assert len(t) == ev["n_loose"].sum(), "truth join row count mismatch"
-    same = t["a"].map(dept).to_numpy() == t["b"].map(dept).to_numpy()
-    ev["n_strict"] = ev["event_id"].map(t.loc[same].groupby("event_id").size()).fillna(0)
-    return ev.astype({"n_loose": "int16", "n_strict": "int16"})
+    for name, group in groups.items():
+        same = same_group(t["a"], t["b"], group)
+        ev[f"n_{name}"] = ev["event_id"].map(t.loc[same].groupby("event_id").size()).fillna(0)
+    return ev.astype({f"n_{t}": "int16" for t in TRUTHS})
 
 
 def candidate_table(rank, a_ids, k):
@@ -111,8 +123,8 @@ def candidate_table(rank, a_ids, k):
     })
 
 
-def score_events(events, cands, truth, dept, ks=KS):
-    """Per-event coverage, hit@k and NDCG@k (binary relevance) for both truth sets."""
+def score_events(events, cands, truth, groups, ks=KS):
+    """Per-event coverage, hit@k and NDCG@k (binary relevance) for every truth set."""
     n_cands = events["a"].map(cands.groupby("a").size()).fillna(0)
     c = events[["event_id", "order_id", "a"]].merge(cands, on="a")
     assert len(c) == n_cands.sum(), "candidate join row count mismatch"
@@ -120,7 +132,8 @@ def score_events(events, cands, truth, dept, ks=KS):
     c = c.merge(truth.assign(loose=True), on=["order_id", "b"], how="left")
     assert len(c) == n_cands.sum(), "truth join added rows"
     c["loose"] = c["loose"].fillna(False).astype(bool)
-    c["strict"] = c["loose"] & (c["a"].map(dept).to_numpy() == c["b"].map(dept).to_numpy())
+    for name, group in groups.items():
+        c[name] = c["loose"] & same_group(c["a"], c["b"], group)
     c["disc"] = 1 / np.log2(c["rank"].astype(float) + 1)
 
     # ideal DCG for n relevant items at cut-off k: sum of the first min(n, k) discounts
@@ -158,11 +171,12 @@ def mean_diff_ci(diff, mask, user_codes, weights):
     return num.sum() / den.sum(), lo, hi
 
 
-def results_table(scores, user_codes, weights, ks=KS):
-    """One row per ranker x truth x k. diff_* = behaviour_dept minus this ranker (hit@k)."""
+def results_table(scores, names, user_codes, weights, ks=KS):
+    """Task 5: one row per ranker x truth x k. diff_* = behaviour_dept minus this ranker."""
     main = scores[MAIN]
     rows = []
-    for name, s in scores.items():
+    for name in names:
+        s = scores[name]
         common = s["covered"].to_numpy() & main["covered"].to_numpy()
         for t in TRUTHS:
             for k in ks:
@@ -186,6 +200,43 @@ def results_table(scores, user_codes, weights, ks=KS):
     return pd.DataFrame(rows)
 
 
+def hybrid_table(scores, names, user_codes, weights, ks=KS):
+    """Task 6, all events: one row per ranker x truth x k; hybrids get hit@k diff vs fallback."""
+    everywhere = np.ones(len(user_codes), dtype=bool)
+    rows = []
+    for name in names:
+        s = scores[name]
+        for t in TRUTHS:
+            for k in ks:
+                hit, ndcg = f"hit_{t}_{k}", f"ndcg_{t}_{k}"
+                row = {"ranker": name, "truth": t, "k": k, "coverage": s["covered"].mean(),
+                       "hit": s[hit].mean(), "ndcg": s[ndcg].mean()}
+                if name in HYBRID_VS:
+                    base = scores[HYBRID_VS[name]]
+                    diff = s[hit].to_numpy(float) - base[hit].to_numpy(float)
+                    d, lo, hi = mean_diff_ci(diff, everywhere, user_codes, weights)
+                    row.update({"vs": HYBRID_VS[name], "diff": d, "diff_lo": lo, "diff_hi": hi})
+                rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def print_hybrid_table(table):
+    """Compact view: hit@k and NDCG@k per ranker, then the hybrid CIs, in points."""
+    pts = "{:.1f}".format
+    for metric in ("hit", "ndcg"):
+        wide = table.pivot(index=["truth", "k"], columns="ranker", values=metric)
+        wide = (wide[list(TASK6_RANKERS)] * 100).reindex(TRUTHS, level=0)
+        print(f"\n{metric}@k (%):")
+        print(wide.to_string(float_format=pts))
+    h = table.dropna(subset=["diff"]).copy()
+    h["ci"] = h.apply(lambda r: f"{100 * r['diff']:+.1f} [{100 * r['diff_lo']:+.1f}, "
+                                f"{100 * r['diff_hi']:+.1f}]", axis=1)
+    h["comparison"] = h["ranker"] + " - " + h["vs"]
+    wide = h.pivot(index=["truth", "k"], columns="comparison", values="ci").reindex(TRUTHS, level=0)
+    print(f"\nhit@k difference, points [95% CI, {N_BOOT} customer resamples, seed {SEED}]:")
+    print(wide.to_string())
+
+
 def ceilings(events, covered):
     """Best possible hit rate: share of events with at least one truth product."""
     rows = []
@@ -205,7 +256,7 @@ def main():
     train_lines = load_train_lines()[["order_id", "user_id", "product_id", "reordered"]]
     products = load_products()
     names = products.set_index("product_id")["product_name"]
-    dept = products.set_index("product_id")["department_id"]
+    groups = {t: products.set_index("product_id")[col] for t, col in GROUP_COL.items()}
 
     events = build_events(reg, train_lines)
     truth = first_time_buys(train_lines)
@@ -215,20 +266,27 @@ def main():
     gc.collect()
 
     events["event_id"] = np.arange(len(events), dtype="int32")
-    events = add_truth_sizes(events, truth, dept)
+    events = add_truth_sizes(events, truth, groups)
 
+    similarity = similarity_ranker(products)
+    popularity = popularity_ranker(products, counts)
+    behaviour_dept = behaviour_dept_ranker(products)
     rankers = {
-        "similarity": similarity_ranker(products),
-        "popularity": popularity_ranker(products, counts),
+        "similarity": similarity,
+        "popularity": popularity,
         "behaviour": behaviour_ranker(),
-        MAIN: behaviour_dept_ranker(products),
+        MAIN: behaviour_dept,
+        "hybrid_sim": hybrid_ranker(behaviour_dept, similarity),
+        "hybrid_pop": hybrid_ranker(behaviour_dept, popularity),
     }
     a_ids = events["a"].unique()
     print(f"\ndistinct regular products in events: {len(a_ids):,}")
     scores = {}
     for name, rank in rankers.items():
         cands = candidate_table(rank, a_ids, max(KS))
-        scores[name] = score_events(events, cands, truth, dept)
+        assert not cands.duplicated(["a", "b"]).any(), f"{name} repeats a candidate"
+        assert not (cands["a"] == cands["b"]).any(), f"{name} returned A"
+        scores[name] = score_events(events, cands, truth, groups)
         print(f"  scored {name}: {len(cands):,} candidate rows")
 
     user_codes = pd.factorize(events["user_id"])[0]
@@ -238,20 +296,17 @@ def main():
     print("\nCeiling (share of events with >= 1 truth product):")
     print(ceil.to_string(index=False, float_format="{:.1%}".format))
 
-    table = results_table(scores, user_codes, weights)
     OUT.mkdir(parents=True, exist_ok=True)
-    table.to_csv(OUT / "eval_results.csv", index=False)
+    results_table(scores, TASK5_RANKERS, user_codes, weights).to_csv(
+        OUT / "eval_results.csv", index=False)
+    hybrid = hybrid_table(scores, TASK6_RANKERS, user_codes, weights)
+    hybrid.to_csv(OUT / "eval_hybrid.csv", index=False)
 
-    pd.set_option("display.width", 250)
-    pd.set_option("display.max_columns", 30)
-    show = table.copy()
-    for c in show.columns:
-        if c not in ("ranker", "truth", "k", "n_common"):
-            show[c] = show[c].map(lambda v: "" if pd.isna(v) else f"{v:.3f}")
-    print(f"\nResults (diff = {MAIN} minus ranker, hit@k; 95% CI from "
-          f"{N_BOOT} customer resamples, seed {SEED}):")
-    print(show.to_string(index=False))
-    print(f"\nsaved to {OUT / 'eval_results.csv'}  ({time.perf_counter() - t0:,.0f}s)")
+    print("\ncoverage, all events: " + ", ".join(
+        f"{n} {scores[n]['covered'].mean():.1%}" for n in TASK6_RANKERS))
+    print_hybrid_table(hybrid)
+    print(f"\nsaved {OUT / 'eval_results.csv'} (Task 5 table) and "
+          f"{OUT / 'eval_hybrid.csv'}  ({time.perf_counter() - t0:,.0f}s)")
 
 
 if __name__ == "__main__":
