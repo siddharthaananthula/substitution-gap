@@ -249,3 +249,48 @@ At a 25% share, a typical customer had 8 regulars (median), the size of a whole 
 - Three projects, three data platforms (Postgres, DuckDB, Snowflake), each chosen for a reason.
 
 **Limit:** DuckDB is not built for many concurrent writers. That doesn't matter for a read-only serving table.
+
+## D018: Acceptance model: LightGBM ranker beats hybrid_pop, and the gain comes from behaviour features
+**Date:** 12 Nov 2026 · **Status:** Active
+
+**Leakage design:**
+- Training label = each customer's LAST PRIOR order. Training features are rebuilt from the prior orders before it (regulars, pairs, lift, popularity).
+- Evaluation is unchanged (D016): features from all prior orders, truth from the final order.
+- Enforced in code: `assert_prior_only` fails the run on any final-order ID, and `no_final_orders()` blocks reads of the final-order file, the evaluation folder and the all-prior pairs file during training. The all-prior pairs file is blocked because it was built using the training label orders.
+
+**Training data:**
+- Training events: 96,448, but only 5,958 have a positive. Trained on those only, because lambdarank learns nothing from groups with all-zero labels.
+- Candidate pool per event: top 20 similarity + top 20 popularity in A's aisle + behaviour pairs with lift_low_adj > 1. Aisle-truth pool recall: 6.5% of evaluation events (57% of the 11.3% ceiling). This is the model's hard upper limit.
+- Label: B is a first-time buy in A's aisle.
+
+**Model:**
+- LightGBM LGBMRanker (lambdarank), 31 leaves, learning rate 0.05.
+- Number of trees chosen by 5-fold GroupKFold by customer (median best iteration), then refit on all positive training events.
+- A single early-stopping split gave 8 trees. Across folds the best iteration ranged from 8 to 51, so the single split was replaced.
+
+**Results (all 65,476 evaluation events, aisle truth, 95% customer-bootstrap CIs):**
+
+| k | hybrid_pop | model | model without behaviour features |
+|---|---|---|---|
+| 1 | 0.75% | 0.88% | 0.80% |
+| 5 | 2.29% | 2.66% | 2.33% |
+
+- Model − hybrid_pop: +0.13 pts [+0.07, +0.19] at k = 1; +0.37 pts [+0.29, +0.47] at k = 5 (16% relative).
+- Model − model without behaviour: +0.07 [+0.01, +0.13] at k = 1; +0.33 [+0.24, +0.42] at k = 5. Significant at every k.
+- Model without behaviour − hybrid_pop: not significant at any k. A single-split run had suggested otherwise, but it did not survive cross-validation.
+- Seed stability (seeds 42, 7, 123): model hit@5 2.63–2.66%, a spread of about 0.02 pts, far smaller than the gaps.
+
+**Interpretation:** popularity, similarity and structure alone only match a simple behaviour-first rule. Adding behavioural lift as model features is what beats it. This is the project's core claim, shown in a learned model.
+
+**Feature importance (gain):** same_aisle 46% (partly by construction: the label requires same aisle), lift_low_adj about 16%, aisle popularity rank about 17%. Name similarity about 3%.
+
+**Findings to keep:**
+- Organic features added almost nothing (0.2–0.3% of gain): no sign in this data that customers avoid organic/conventional switches. The dietary hard-block lever (D004) is not supported by this proxy and would need real accept/reject data.
+- Truth labels are noisy: one Organic Hass Avocado customer's actual first-time buys were Asian Pears and Granny Smith Apples.
+
+**Limitations:**
+- Absolute hit rates are low (under 3%) because truth is a proxy, not observed acceptance, and the pool caps reachable events at 6.5%.
+- The intervals resample customers, not training randomness; seed spread was checked separately.
+- Pool size was kept at N = 20 per source.
+
+**Rejected:** hyperparameter search, which would risk tuning until the model wins.

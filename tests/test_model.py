@@ -3,7 +3,14 @@ import numpy as np
 import pandas as pd
 
 from src.evaluate import score_events
-from src.model import customer_split, group_sizes, model_candidates, positive_events_only
+from src.model import (
+    customer_split,
+    cv_best_iterations,
+    group_sizes,
+    model_candidates,
+    positive_events_only,
+    train_final,
+)
 
 
 def rows():
@@ -27,6 +34,23 @@ def test_customer_split_is_by_customer_and_fixed():
     assert (m1 == m2).all()  # fixed seed
     assert r.loc[m1, "user_id"].nunique() == 20
     assert not set(r.loc[m1, "user_id"]) & set(r.loc[~m1, "user_id"])
+
+
+def test_cv_folds_split_by_customer_and_refit_uses_n_iter():
+    rng = np.random.default_rng(0)
+    n_events = 60
+    r = pd.DataFrame({
+        "event_id": np.repeat(np.arange(n_events), 5),
+        "user_id": np.repeat(np.arange(n_events) // 2, 5),  # 2 events per customer
+        "x": rng.random(n_events * 5).astype("float32"),
+    })
+    r["label"] = (r.groupby("event_id").cumcount() == 0).astype("int8")  # one positive per event
+    r.loc[r["label"] == 1, "x"] += 1  # learnable signal
+    cv = cv_best_iterations(r, ["x"], seed=42, n_folds=3)
+    assert len(cv) == 3 and (cv["best_iteration"] >= 1).all()
+    assert cv["valid_events"].sum() == n_events  # every event held out exactly once
+    m = train_final(r, ["x"], n_iter=7, seed=42)
+    assert m.booster_.num_trees() == 7
 
 
 def test_group_sizes():
