@@ -91,9 +91,14 @@ def behaviour_dept_ranker(products, path=SUBSTITUTES, min_score=MIN_LIFT_LOW_ADJ
     return _pairs_ranker(pairs)
 
 
-def first_buy_counts():
-    """How often each product was a first-time buy (reordered == 0) in PRIOR orders."""
-    lines = load_order_products()[["product_id", "reordered"]]  # prior file only
+def first_buy_counts(lines=None):
+    """How often each product was a first-time buy (reordered == 0) in PRIOR orders.
+
+    Default: all prior orders. Pass prior lines (e.g. a training feature window) to count those.
+    """
+    if lines is None:
+        lines = load_order_products()  # prior file only
+    lines = lines[["product_id", "reordered"]]
     return lines.loc[lines["reordered"] == 0, "product_id"].value_counts()
 
 
