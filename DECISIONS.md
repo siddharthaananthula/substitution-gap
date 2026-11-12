@@ -168,9 +168,8 @@ At a 25% share, a typical customer had 8 regulars (median), the size of a whole 
 
 ---
 
-## D015: Rank by an adjusted lower confidence bound; cut-off at 2
+## D015: Rank by an  Adjusted lift_low above  Pairs  Regular products covered (of 2,280 with any candidate pair; 15,178 regulars in total)
 **Date:** 9 Oct 2026 · **Status:** Active
-
 **Method:**
 - Minimum evidence: B seen at least 5 times and A missing at least 30 times.
 - +1 smoothing on the bought side, so pairs never seen when A was bought don't get infinite lift.
